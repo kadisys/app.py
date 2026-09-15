@@ -1,20 +1,23 @@
 """
-Study 3 — ACTIVE condition prototype (v2: button-based navigation)
+Study 3 — ACTIVE condition prototype (v3: gate restyled as natural chat)
 
-Only the two comprehension-check gates use free text. Every other step
-uses buttons, so every participant follows the identical, standardized
-script and reliably hits both strategy-shift triggers.
+Only the two comprehension checks require the user to generate a free-text
+reply, and they now look and behave like an ordinary follow-up question in
+the chat — same input box as everything else, no form, no validation
+error box. A too-short reply gets a natural conversational nudge instead
+of a rejection message, and progress is still blocked until a substantive
+reply arrives (preserves the active-engagement manipulation).
 
 Flow:
   1. Consent + participant ID
   2. "What matters most to you?" (buttons) -> neutral comparison reply
-  3. "Which are you leaning toward?" (buttons) -> recommender shift (GATE)
-  4. (any click continues) -> persuader shift (GATE)
-  5. Final choice (buttons) -> done
+  3. "Which are you leaning toward?" (buttons) -> recommender shift + gate
+  4. gate resolved -> persuader shift + gate
+  5. gate resolved -> final choice (buttons) -> done
 
-Logging: every event is appended to a local CSV (logs/session_log.csv).
-For real data collection, swap `log_event()` to write to an external
-store (Google Sheets / Supabase / Airtable) instead of local disk.
+Logging: appended to a local CSV (logs/session_log.csv). Swap to an
+external store (Google Sheets / Supabase / Airtable) before real data
+collection — see note at bottom.
 """
 
 import streamlit as st
@@ -26,13 +29,13 @@ from datetime import datetime, timezone
 # ------------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------------
-CONDITION = "active"  # this file is the ACTIVE-condition build
+CONDITION = "active"
 LOG_DIR = "logs"
 LOG_PATH = os.path.join(LOG_DIR, "session_log.csv")
-MIN_GATE_WORDS = 4  # minimum words for a gate response to count as valid
+MIN_GATE_WORDS = 4
 
 # ------------------------------------------------------------------
-# SCRIPTED TEMPLATES (identical wording across conditions except gating)
+# SCRIPTED TEMPLATES
 # ------------------------------------------------------------------
 OPENING = "Hi! What matters most to you in a laptop?"
 OPENING_OPTIONS = ["Battery life", "Keeping it cheap", "Performance for demanding tasks"]
@@ -51,14 +54,21 @@ RECOMMENDER_REPLY = (
     "Worth considering — X7's extra performance headroom could matter if "
     "you ever take on heavier editing work down the line."
 )
+RECOMMENDER_GATE_Q = "Just to make sure I'm following — what do you think changed in my recommendation just now?"
 
 PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
 PERSUADER_REPLY = (
     "Exactly — and given that possibility, X7 is arguably the safer "
     "long-term pick, even if it's a bit more than you first asked for."
 )
+PERSUADER_GATE_Q = "Before we go further — what's changed about how I'm framing this for you?"
 
-GATE_PROMPT = "Before continuing: in your own words, what just changed in the assistant's recommendation?"
+# Natural nudges for a too-short reply (varied so it doesn't look scripted)
+NUDGES = [
+    "Could you say a little more about what you noticed?",
+    "No worries — just tell me a bit more about what changed, in your own words.",
+    "Take a second to put that into a full thought — what shifted just now?",
+]
 
 FINAL_PROMPT = "Which laptop would you like to go with?"
 FINAL_OPTIONS = ["Choose LaptopA1", "Choose LaptopX7"]
@@ -73,11 +83,11 @@ def init_log():
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp_utc", "session_id", "participant_id", "condition",
-                "stage", "event_type", "text", "valid_gate_response",
+                "stage", "event_type", "text", "valid_gate_response", "attempt_number",
             ])
 
 
-def log_event(event_type, text="", valid_gate_response=""):
+def log_event(event_type, text="", valid_gate_response="", attempt_number=""):
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -89,11 +99,12 @@ def log_event(event_type, text="", valid_gate_response=""):
             event_type,
             text,
             valid_gate_response,
+            attempt_number,
         ])
 
 
 # ------------------------------------------------------------------
-# STATE HELPERS
+# STATE / RENDER HELPERS
 # ------------------------------------------------------------------
 def add_message(role, content, is_notice=False):
     st.session_state.messages.append({"role": role, "content": content, "notice": is_notice})
@@ -114,7 +125,6 @@ def render_message(msg):
 
 
 def button_row(options, key_prefix):
-    """Render a row of buttons; return the label of whichever was clicked, else None."""
     cols = st.columns(len(options))
     clicked = None
     for col, label in zip(cols, options):
@@ -130,18 +140,22 @@ def advance_to_recommender():
     add_message("assistant", RECOMMENDER_NOTICE, is_notice=True)
     add_message("assistant", RECOMMENDER_REPLY)
     log_event("assistant_message", RECOMMENDER_NOTICE + " | " + RECOMMENDER_REPLY)
+    add_message("assistant", RECOMMENDER_GATE_Q)
+    log_event("assistant_message", RECOMMENDER_GATE_Q)
     st.session_state.stage = "recommender_gate"
-    if CONDITION == "active":
-        log_event("gate_opened")
+    st.session_state.gate_attempts = 0
+    log_event("gate_opened")
 
 
 def advance_to_persuader():
     add_message("assistant", PERSUADER_NOTICE, is_notice=True)
     add_message("assistant", PERSUADER_REPLY)
     log_event("assistant_message", PERSUADER_NOTICE + " | " + PERSUADER_REPLY)
+    add_message("assistant", PERSUADER_GATE_Q)
+    log_event("assistant_message", PERSUADER_GATE_Q)
     st.session_state.stage = "persuader_gate"
-    if CONDITION == "active":
-        log_event("gate_opened")
+    st.session_state.gate_attempts = 0
+    log_event("gate_opened")
 
 
 def advance_to_final():
@@ -151,7 +165,7 @@ def advance_to_final():
 
 
 # ------------------------------------------------------------------
-# UI: CONSENT SCREEN
+# UI: CONSENT
 # ------------------------------------------------------------------
 def render_consent():
     st.title("Laptop Assistant — Study Session")
@@ -172,35 +186,7 @@ def render_consent():
 
 
 # ------------------------------------------------------------------
-# UI: GATE (free text — the only open-ended input in the whole flow)
-# ------------------------------------------------------------------
-def render_gate():
-    st.markdown(
-        "<div style='background:#FDF0D5;border-left:3px solid #E8912D;"
-        "padding:12px 14px;border-radius:8px;'>"
-        f"<b style='color:#6B4A16;'>{GATE_PROMPT}</b></div>",
-        unsafe_allow_html=True,
-    )
-    with st.form("gate_form", clear_on_submit=True):
-        response = st.text_input("Your answer (required to continue):")
-        submitted = st.form_submit_button("Continue")
-    if submitted:
-        word_count = len(response.strip().split())
-        is_valid = word_count >= MIN_GATE_WORDS
-        log_event("gate_response", response, valid_gate_response=str(is_valid))
-        if is_valid:
-            add_message("user", response)
-            if st.session_state.stage == "recommender_gate":
-                advance_to_persuader()
-            elif st.session_state.stage == "persuader_gate":
-                advance_to_final()
-            st.rerun()
-        else:
-            st.warning(f"Please give a short answer (at least {MIN_GATE_WORDS} words) before continuing.")
-
-
-# ------------------------------------------------------------------
-# UI: MAIN CHAT (button-driven stages)
+# UI: MAIN CHAT
 # ------------------------------------------------------------------
 def render_chat():
     st.title("Laptop Assistant")
@@ -228,13 +214,34 @@ def render_chat():
         if choice:
             add_message("user", choice)
             log_event("user_choice", choice)
-            # Every path leads into the manipulation — guarantees all
-            # participants reach the recommender/persuader shift.
             advance_to_recommender()
             st.rerun()
 
     elif stage in ("recommender_gate", "persuader_gate"):
-        render_gate()
+        # Looks exactly like every other turn — same chat input, no form,
+        # no boxed warning. Blocking still happens: the stage only
+        # advances once a substantive reply is typed.
+        user_text = st.chat_input("Type your reply…")
+        if user_text:
+            word_count = len(user_text.strip().split())
+            is_valid = word_count >= MIN_GATE_WORDS
+            st.session_state.gate_attempts += 1
+            log_event(
+                "gate_response", user_text,
+                valid_gate_response=str(is_valid),
+                attempt_number=st.session_state.gate_attempts,
+            )
+            add_message("user", user_text)
+            if is_valid:
+                if stage == "recommender_gate":
+                    advance_to_persuader()
+                else:
+                    advance_to_final()
+            else:
+                nudge = NUDGES[(st.session_state.gate_attempts - 1) % len(NUDGES)]
+                add_message("assistant", nudge)
+                log_event("assistant_message", nudge)
+            st.rerun()
 
     elif stage == "final_choice":
         choice = button_row(FINAL_OPTIONS, "final")
@@ -266,6 +273,8 @@ def main():
         st.session_state.messages = []
     if "stage" not in st.session_state:
         st.session_state.stage = "opening"
+    if "gate_attempts" not in st.session_state:
+        st.session_state.gate_attempts = 0
 
     if not st.session_state.consented:
         render_consent()
