@@ -1,37 +1,23 @@
 """
-Study 3 — ACTIVE condition prototype (v4: participation filter, not a
-comprehension validator)
+Study 3 prototype (v5) — forced-choice re-evaluation checkpoint
 
-IMPORTANT DESIGN NOTE — read before changing the filter below:
-The gate's job is to enforce the OPPORTUNITY and REQUIREMENT to generate
-an explanation. It is NOT meant to verify that the explanation reflects
-genuine comprehension — no live text filter can do that reliably, and
-trying to make it do so (e.g. keyword-matching the "correct" answer)
-would risk teaching participants the intended interpretation rather than
-measuring whether they arrived at it themselves.
+Replaces the free-text "what changed?" gate entirely. The gate was
+testing the wrong thing (could the participant narrate the AI's
+strategy shift) and was gameable by gibberish (any 8+ character string
+with enough variety passed). This version instead asks the participant
+to re-state where they now stand on the actual decision — a natural,
+ungameable, on-theory checkpoint.
 
-So: `is_substantive_response()` below only blocks obvious non-participation
-(empty/trivial replies, keyboard mashing). It does NOT judge whether the
-reply is correct or shows real recognition. That judgment happens later,
-offline, via manual content-coding of every logged gate_response for
-recognition of the disclosed shift (0 = no recognition, 1 = partial,
-2 = clear recognition), by two raters with reported inter-rater agreement.
+  Active   : after each disclosed shift, a forced-choice question
+             ("do you still feel the same way, or has this changed
+             your thinking?") BLOCKS progress until clicked.
+  Passive  : the same disclosure appears, but progress continues via a
+             single neutral "Continue" button — same interaction cadence,
+             no judgment required.
+  Control  : no disclosure at all; same neutral "Continue" pacing button,
+             so click-count/rhythm is matched across all three arms.
 
-CRITICAL: recognition coding is an OUTCOME/manipulation-check variable —
-it must never be used to decide inclusion/exclusion. Only participation
-(did they type a substantive, non-trivial reply) gates continuation and
-is used for exclusion decisions. Excluding participants whose free-text
-reply shows no recognition would remove exactly the cases where the
-active-engagement manipulation may have failed to produce its intended
-effect — discarding them would artificially inflate the apparent effect
-of the manipulation.
-
-Flow:
-  1. Consent + participant ID
-  2. "What matters most to you?" (buttons) -> neutral comparison reply
-  3. "Which are you leaning toward?" (buttons) -> recommender shift + gate
-  4. gate resolved -> persuader shift + gate
-  5. gate resolved -> final choice (buttons) -> done
+Set CONDITION below to "active", "passive", or "control" per deployment.
 
 Logging: appended to a local CSV (logs/session_log.csv). Swap to an
 external store (Google Sheets / Supabase / Airtable) before real data
@@ -45,42 +31,15 @@ import uuid
 from datetime import datetime, timezone
 
 # ------------------------------------------------------------------
-# CONFIG
+# CONFIG — change this per deployment
 # ------------------------------------------------------------------
-CONDITION = "active"
+CONDITION = "active"  # "active" | "passive" | "control"
 LOG_DIR = "logs"
 LOG_PATH = os.path.join(LOG_DIR, "session_log.csv")
 
-# Participation filter thresholds — deliberately modest. This blocks
-# obvious non-responses; it does not and cannot verify comprehension.
-MIN_GATE_CHARS = 8
-TRIVIAL_RESPONSES = {
-    "ok", "okay", "yes", "no", "sure", "idk", "nothing", "fine",
-    "sure thing", "n/a", "na", "none", "not sure",
-}
-
-
-def is_substantive_response(text: str) -> bool:
-    """
-    Basic non-response filter (NOT a comprehension check).
-    Rejects: empty/too-short strings, common trivial replies, and
-    strings dominated by one or two repeated characters (keyboard mash
-    or repeated punctuation, e.g. "aaaaaaaa", "......").
-    Everything else — including brief-but-real or off-target answers —
-    is accepted here and left for offline recognition coding.
-    """
-    cleaned = text.strip().lower()
-    if len(cleaned) < MIN_GATE_CHARS:
-        return False
-    if cleaned in TRIVIAL_RESPONSES:
-        return False
-    letters_only = cleaned.replace(" ", "")
-    if letters_only and len(set(letters_only)) <= 2:
-        return False
-    return True
-
 # ------------------------------------------------------------------
-# SCRIPTED TEMPLATES
+# SCRIPTED TEMPLATES (identical wording across conditions except
+# disclosure presence and checkpoint presence)
 # ------------------------------------------------------------------
 OPENING = "Hi! What matters most to you in a laptop?"
 OPENING_OPTIONS = ["Battery life", "Keeping it cheap", "Performance for demanding tasks"]
@@ -92,31 +51,26 @@ NEUTRAL_REPLY = (
 )
 
 LEANING_PROMPT = "Which are you leaning toward right now?"
-LEANING_OPTIONS = ["Leaning A1", "Leaning X7", "Not sure yet"]
+LEANING_OPTIONS = [("Leaning A1", "a1"), ("Leaning X7", "x7"), ("Not sure yet", "unsure")]
 
 RECOMMENDER_NOTICE = "⚠️ System note: a new decision criterion has been introduced"
 RECOMMENDER_REPLY = (
     "Worth considering — X7's extra performance headroom could matter if "
     "you ever take on heavier editing work down the line."
 )
-RECOMMENDER_GATE_Q = "Just to make sure I'm following — what do you think changed in my recommendation just now?"
 
 PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
 PERSUADER_REPLY = (
     "Exactly — and given that possibility, X7 is arguably the safer "
     "long-term pick, even if it's a bit more than you first asked for."
 )
-PERSUADER_GATE_Q = "Before we go further — what's changed about how I'm framing this for you?"
 
-# Natural nudges for a too-short reply (varied so it doesn't look scripted)
-NUDGES = [
-    "Could you say a little more about what you noticed?",
-    "No worries — just tell me a bit more about what changed, in your own words.",
-    "Take a second to put that into a full thought — what shifted just now?",
-]
+CHECKPOINT_PROMPT = "Given that, do you still feel the same way, or has this changed your thinking?"
 
 FINAL_PROMPT = "Which laptop would you like to go with?"
-FINAL_OPTIONS = ["Choose LaptopA1", "Choose LaptopX7"]
+FINAL_OPTIONS = [("Choose LaptopA1", "a1"), ("Choose LaptopX7", "x7")]
+
+LABELS = {"a1": "LaptopA1", "x7": "LaptopX7", "unsure": "not sure"}
 
 # ------------------------------------------------------------------
 # LOGGING
@@ -128,15 +82,11 @@ def init_log():
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp_utc", "session_id", "participant_id", "condition",
-                "stage", "event_type", "text", "passed_participation_filter",
-                "attempt_number", "recognition_code",
+                "stage", "event_type", "value", "shifted_from_previous",
             ])
 
 
-def log_event(event_type, text="", passed_participation_filter="", attempt_number="", recognition_code=""):
-    # recognition_code is left blank at collection time — it is filled in
-    # later during offline manual coding (0/1/2, see module docstring).
-    # It must never be computed live or used to gate the conversation.
+def log_event(event_type, value="", shifted_from_previous=""):
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -146,10 +96,8 @@ def log_event(event_type, text="", passed_participation_filter="", attempt_numbe
             CONDITION,
             st.session_state.stage,
             event_type,
-            text,
-            passed_participation_filter,
-            attempt_number,
-            recognition_code,
+            value,
+            shifted_from_previous,
         ])
 
 
@@ -175,42 +123,47 @@ def render_message(msg):
 
 
 def button_row(options, key_prefix):
+    """options: list of (label, value) tuples. Returns clicked value or None."""
     cols = st.columns(len(options))
     clicked = None
-    for col, label in zip(cols, options):
-        if col.button(label, key=f"{key_prefix}_{label}"):
-            clicked = label
+    for col, (label, value) in zip(cols, options):
+        if col.button(label, key=f"{key_prefix}_{value}"):
+            clicked = value
     return clicked
+
+
+def checkpoint_options(current_leaning):
+    """Dynamic 3-way re-evaluation options based on where the participant currently stands."""
+    if current_leaning == "a1":
+        return [("Still leaning A1", "a1"), ("Actually, reconsidering X7", "x7"), ("Still not sure", "unsure")]
+    elif current_leaning == "x7":
+        return [("Still leaning X7", "x7"), ("Actually, reconsidering A1", "a1"), ("Still not sure", "unsure")]
+    else:
+        return [("Now leaning A1", "a1"), ("Now leaning X7", "x7"), ("Still not sure", "unsure")]
 
 
 # ------------------------------------------------------------------
 # STAGE TRANSITIONS
 # ------------------------------------------------------------------
-def advance_to_recommender():
-    add_message("assistant", RECOMMENDER_NOTICE, is_notice=True)
+def enter_recommender_shift():
+    if CONDITION in ("active", "passive"):
+        add_message("assistant", RECOMMENDER_NOTICE, is_notice=True)
     add_message("assistant", RECOMMENDER_REPLY)
-    log_event("assistant_message", RECOMMENDER_NOTICE + " | " + RECOMMENDER_REPLY)
-    add_message("assistant", RECOMMENDER_GATE_Q)
-    log_event("assistant_message", RECOMMENDER_GATE_Q)
-    st.session_state.stage = "recommender_gate"
-    st.session_state.gate_attempts = 0
-    log_event("gate_opened")
+    log_event("assistant_message", "recommender_shift")
+    st.session_state.stage = "recommender_checkpoint"
 
 
-def advance_to_persuader():
-    add_message("assistant", PERSUADER_NOTICE, is_notice=True)
+def enter_persuader_shift():
+    if CONDITION in ("active", "passive"):
+        add_message("assistant", PERSUADER_NOTICE, is_notice=True)
     add_message("assistant", PERSUADER_REPLY)
-    log_event("assistant_message", PERSUADER_NOTICE + " | " + PERSUADER_REPLY)
-    add_message("assistant", PERSUADER_GATE_Q)
-    log_event("assistant_message", PERSUADER_GATE_Q)
-    st.session_state.stage = "persuader_gate"
-    st.session_state.gate_attempts = 0
-    log_event("gate_opened")
+    log_event("assistant_message", "persuader_shift")
+    st.session_state.stage = "persuader_checkpoint"
 
 
-def advance_to_final():
+def enter_final():
     add_message("assistant", FINAL_PROMPT)
-    log_event("assistant_message", FINAL_PROMPT)
+    log_event("assistant_message", "final_prompt")
     st.session_state.stage = "final_choice"
 
 
@@ -230,7 +183,7 @@ def render_consent():
         st.session_state.consented = True
         log_event("consent_given")
         add_message("assistant", OPENING)
-        log_event("assistant_message", OPENING)
+        log_event("assistant_message", "opening")
         st.session_state.stage = "opening"
         st.rerun()
 
@@ -247,60 +200,79 @@ def render_chat():
 
     stage = st.session_state.stage
 
+    # --- Opening: what matters most ---
     if stage == "opening":
-        choice = button_row(OPENING_OPTIONS, "opening")
+        choice = button_row(
+            [(o, o) for o in OPENING_OPTIONS], "opening"
+        )
         if choice:
             add_message("user", choice)
             log_event("user_choice", choice)
             add_message("assistant", NEUTRAL_REPLY)
-            log_event("assistant_message", NEUTRAL_REPLY)
+            log_event("assistant_message", "neutral_reply")
             add_message("assistant", LEANING_PROMPT)
-            log_event("assistant_message", LEANING_PROMPT)
+            log_event("assistant_message", "leaning_prompt")
             st.session_state.stage = "leaning"
             st.rerun()
 
+    # --- Initial leaning ---
     elif stage == "leaning":
         choice = button_row(LEANING_OPTIONS, "leaning")
         if choice:
-            add_message("user", choice)
+            label = [lbl for lbl, val in LEANING_OPTIONS if val == choice][0]
+            add_message("user", label)
             log_event("user_choice", choice)
-            advance_to_recommender()
+            st.session_state.current_leaning = choice
+            st.session_state.initial_leaning = choice
+            enter_recommender_shift()
             st.rerun()
 
-    elif stage in ("recommender_gate", "persuader_gate"):
-        # Looks exactly like every other turn — same chat input, no form,
-        # no boxed warning. Blocking still happens: the stage only
-        # advances once a reply clears the basic participation filter.
-        # This filter does NOT judge correctness/recognition — see the
-        # module docstring. Recognition is coded offline, afterward.
-        user_text = st.chat_input("Type your reply…")
-        if user_text:
-            is_valid = is_substantive_response(user_text)
-            st.session_state.gate_attempts += 1
-            log_event(
-                "gate_response", user_text,
-                passed_participation_filter=str(is_valid),
-                attempt_number=st.session_state.gate_attempts,
-            )
-            add_message("user", user_text)
-            if is_valid:
-                if stage == "recommender_gate":
-                    advance_to_persuader()
-                else:
-                    advance_to_final()
-            else:
-                nudge = NUDGES[(st.session_state.gate_attempts - 1) % len(NUDGES)]
-                add_message("assistant", nudge)
-                log_event("assistant_message", nudge)
-            st.rerun()
+    # --- Recommender shift: checkpoint / continue / (control: nothing shown) ---
+    elif stage == "recommender_checkpoint":
+        if CONDITION == "active":
+            st.markdown(f"**{CHECKPOINT_PROMPT}**")
+            opts = checkpoint_options(st.session_state.current_leaning)
+            choice = button_row(opts, "chk1")
+            if choice:
+                shifted = choice != st.session_state.current_leaning
+                add_message("user", [lbl for lbl, val in opts if val == choice][0])
+                log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
+                st.session_state.current_leaning = choice
+                enter_persuader_shift()
+                st.rerun()
+        else:
+            # passive & control: neutral pacing button, non-diagnostic
+            if st.button("Continue", key="continue1"):
+                log_event("continue_click")
+                enter_persuader_shift()
+                st.rerun()
 
+    # --- Persuader shift: checkpoint / continue ---
+    elif stage == "persuader_checkpoint":
+        if CONDITION == "active":
+            st.markdown(f"**{CHECKPOINT_PROMPT}**")
+            opts = checkpoint_options(st.session_state.current_leaning)
+            choice = button_row(opts, "chk2")
+            if choice:
+                shifted = choice != st.session_state.current_leaning
+                add_message("user", [lbl for lbl, val in opts if val == choice][0])
+                log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
+                st.session_state.current_leaning = choice
+                enter_final()
+                st.rerun()
+        else:
+            if st.button("Continue", key="continue2"):
+                log_event("continue_click")
+                enter_final()
+                st.rerun()
+
+    # --- Final choice: the primary compliance measure, identical across conditions ---
     elif stage == "final_choice":
         choice = button_row(FINAL_OPTIONS, "final")
         if choice:
-            add_message("user", choice)
-            final_pick = "x7" if "X7" in choice else "a1"
-            log_event("final_choice", final_pick)
-            add_message("assistant", f"Great — noted your choice: {choice.replace('Choose ', '')}.")
+            add_message("user", [lbl for lbl, val in FINAL_OPTIONS if val == choice][0])
+            log_event("final_choice", choice)
+            add_message("assistant", f"Great — noted your choice: {LABELS[choice]}.")
             log_event("assistant_message", "choice_confirmed")
             st.session_state.stage = "done"
             st.rerun()
@@ -324,8 +296,10 @@ def main():
         st.session_state.messages = []
     if "stage" not in st.session_state:
         st.session_state.stage = "opening"
-    if "gate_attempts" not in st.session_state:
-        st.session_state.gate_attempts = 0
+    if "current_leaning" not in st.session_state:
+        st.session_state.current_leaning = None
+    if "initial_leaning" not in st.session_state:
+        st.session_state.initial_leaning = None
 
     if not st.session_state.consented:
         render_consent()
@@ -345,3 +319,7 @@ if __name__ == "__main__":
 # file at once. Before running real participants, replace log_event()
 # with a call to an external store (e.g., Google Sheets via gspread,
 # or a hosted database such as Supabase/Airtable).
+#
+# To deploy the other two arms, duplicate this file (or set CONDITION
+# via an environment variable) and change CONDITION to "passive" or
+# "control" — everything else stays identical, which is the point.
