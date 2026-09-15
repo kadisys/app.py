@@ -54,7 +54,7 @@ RECOMMENDER_REPLY = (
     "Worth considering — X7's extra performance headroom could matter if "
     "you ever take on heavier editing work down the line."
 )
-RECOMMENDER_GATE_Q = "Just to make sure I'm following — what do you think changed in my recommendation just now?"
+RECOMMENDER_GATE_Q = "Before we continue, could you briefly explain what changed in the recommendation just now, in your own words?"
 
 PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
 PERSUADER_REPLY = (
