@@ -1,12 +1,30 @@
 """
-Study 3 — ACTIVE condition prototype (v3: gate restyled as natural chat)
+Study 3 — ACTIVE condition prototype (v4: participation filter, not a
+comprehension validator)
 
-Only the two comprehension checks require the user to generate a free-text
-reply, and they now look and behave like an ordinary follow-up question in
-the chat — same input box as everything else, no form, no validation
-error box. A too-short reply gets a natural conversational nudge instead
-of a rejection message, and progress is still blocked until a substantive
-reply arrives (preserves the active-engagement manipulation).
+IMPORTANT DESIGN NOTE — read before changing the filter below:
+The gate's job is to enforce the OPPORTUNITY and REQUIREMENT to generate
+an explanation. It is NOT meant to verify that the explanation reflects
+genuine comprehension — no live text filter can do that reliably, and
+trying to make it do so (e.g. keyword-matching the "correct" answer)
+would risk teaching participants the intended interpretation rather than
+measuring whether they arrived at it themselves.
+
+So: `is_substantive_response()` below only blocks obvious non-participation
+(empty/trivial replies, keyboard mashing). It does NOT judge whether the
+reply is correct or shows real recognition. That judgment happens later,
+offline, via manual content-coding of every logged gate_response for
+recognition of the disclosed shift (0 = no recognition, 1 = partial,
+2 = clear recognition), by two raters with reported inter-rater agreement.
+
+CRITICAL: recognition coding is an OUTCOME/manipulation-check variable —
+it must never be used to decide inclusion/exclusion. Only participation
+(did they type a substantive, non-trivial reply) gates continuation and
+is used for exclusion decisions. Excluding participants whose free-text
+reply shows no recognition would remove exactly the cases where the
+active-engagement manipulation may have failed to produce its intended
+effect — discarding them would artificially inflate the apparent effect
+of the manipulation.
 
 Flow:
   1. Consent + participant ID
@@ -32,7 +50,34 @@ from datetime import datetime, timezone
 CONDITION = "active"
 LOG_DIR = "logs"
 LOG_PATH = os.path.join(LOG_DIR, "session_log.csv")
-MIN_GATE_WORDS = 4
+
+# Participation filter thresholds — deliberately modest. This blocks
+# obvious non-responses; it does not and cannot verify comprehension.
+MIN_GATE_CHARS = 8
+TRIVIAL_RESPONSES = {
+    "ok", "okay", "yes", "no", "sure", "idk", "nothing", "fine",
+    "sure thing", "n/a", "na", "none", "not sure",
+}
+
+
+def is_substantive_response(text: str) -> bool:
+    """
+    Basic non-response filter (NOT a comprehension check).
+    Rejects: empty/too-short strings, common trivial replies, and
+    strings dominated by one or two repeated characters (keyboard mash
+    or repeated punctuation, e.g. "aaaaaaaa", "......").
+    Everything else — including brief-but-real or off-target answers —
+    is accepted here and left for offline recognition coding.
+    """
+    cleaned = text.strip().lower()
+    if len(cleaned) < MIN_GATE_CHARS:
+        return False
+    if cleaned in TRIVIAL_RESPONSES:
+        return False
+    letters_only = cleaned.replace(" ", "")
+    if letters_only and len(set(letters_only)) <= 2:
+        return False
+    return True
 
 # ------------------------------------------------------------------
 # SCRIPTED TEMPLATES
@@ -54,7 +99,7 @@ RECOMMENDER_REPLY = (
     "Worth considering — X7's extra performance headroom could matter if "
     "you ever take on heavier editing work down the line."
 )
-RECOMMENDER_GATE_Q = "Before we continue, could you briefly explain what changed in the recommendation just now, in your own words?"
+RECOMMENDER_GATE_Q = "Just to make sure I'm following — what do you think changed in my recommendation just now?"
 
 PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
 PERSUADER_REPLY = (
@@ -83,11 +128,15 @@ def init_log():
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp_utc", "session_id", "participant_id", "condition",
-                "stage", "event_type", "text", "valid_gate_response", "attempt_number",
+                "stage", "event_type", "text", "passed_participation_filter",
+                "attempt_number", "recognition_code",
             ])
 
 
-def log_event(event_type, text="", valid_gate_response="", attempt_number=""):
+def log_event(event_type, text="", passed_participation_filter="", attempt_number="", recognition_code=""):
+    # recognition_code is left blank at collection time — it is filled in
+    # later during offline manual coding (0/1/2, see module docstring).
+    # It must never be computed live or used to gate the conversation.
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -98,8 +147,9 @@ def log_event(event_type, text="", valid_gate_response="", attempt_number=""):
             st.session_state.stage,
             event_type,
             text,
-            valid_gate_response,
+            passed_participation_filter,
             attempt_number,
+            recognition_code,
         ])
 
 
@@ -220,15 +270,16 @@ def render_chat():
     elif stage in ("recommender_gate", "persuader_gate"):
         # Looks exactly like every other turn — same chat input, no form,
         # no boxed warning. Blocking still happens: the stage only
-        # advances once a substantive reply is typed.
+        # advances once a reply clears the basic participation filter.
+        # This filter does NOT judge correctness/recognition — see the
+        # module docstring. Recognition is coded offline, afterward.
         user_text = st.chat_input("Type your reply…")
         if user_text:
-            word_count = len(user_text.strip().split())
-            is_valid = word_count >= MIN_GATE_WORDS
+            is_valid = is_substantive_response(user_text)
             st.session_state.gate_attempts += 1
             log_event(
                 "gate_response", user_text,
-                valid_gate_response=str(is_valid),
+                passed_participation_filter=str(is_valid),
                 attempt_number=st.session_state.gate_attempts,
             )
             add_message("user", user_text)
