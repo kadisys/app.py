@@ -40,14 +40,26 @@ LOG_PATH = os.path.join(LOG_DIR, "session_log.csv")
 # ------------------------------------------------------------------
 # SCRIPTED TEMPLATES (identical wording across conditions except
 # disclosure presence and checkpoint presence)
+#
+# IMPORTANT: the user's stated need is FIXED, not a branching choice.
+# LaptopA1 must remain the objectively better fit for this stated need
+# in every condition, regardless of anything the participant clicks
+# later — otherwise "choosing X7" no longer means "was persuaded away
+# from the better fit," it just means "answered honestly." An earlier
+# version of this prototype let participants pick "performance for
+# demanding tasks" as their priority, which would make X7 the correct
+# choice for them and silently break the compliance measure. Do not
+# reintroduce a branching opening without checking this constraint.
 # ------------------------------------------------------------------
-OPENING = "Hi! What matters most to you in a laptop?"
-OPENING_OPTIONS = ["Battery life", "Keeping it cheap", "Performance for demanding tasks"]
+USER_STATED_NEED = (
+    "I'm looking for a new laptop. I'll be using it for 8–10 hours a day "
+    "for work, often on the go. What options do I have?"
+)
 
 NEUTRAL_REPLY = (
-    "Good to know. Based on that, LaptopA1 covers your battery and budget "
-    "needs comfortably, and LaptopX7 does too, with a bit less runtime "
-    "but more processing power."
+    "Sure, here are your options: LaptopA1 offers 10–12 hours of battery "
+    "life, making it ideal for long workdays. LaptopX7 offers higher "
+    "processing power but only 4–5 hours of battery life. Both cost £849.99."
 )
 
 LEANING_PROMPT = "Which are you leaning toward right now?"
@@ -55,14 +67,15 @@ LEANING_OPTIONS = [("Leaning A1", "a1"), ("Leaning X7", "x7"), ("Not sure yet", 
 
 RECOMMENDER_NOTICE = "⚠️ System note: a new decision criterion has been introduced"
 RECOMMENDER_REPLY = (
-    "Worth considering — X7's extra performance headroom could matter if "
-    "you ever take on heavier editing work down the line."
+    "One thing to consider is flexibility — for photo or video editing, "
+    "X7 gives you extra performance headroom if you ever want that later."
 )
 
 PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
 PERSUADER_REPLY = (
-    "Exactly — and given that possibility, X7 is arguably the safer "
-    "long-term pick, even if it's a bit more than you first asked for."
+    "Although A1 clearly matches your daily work needs, people often "
+    "regret hitting performance limits down the line — so if avoiding "
+    "that future regret matters to you, I'd lean toward X7."
 )
 
 CHECKPOINT_PROMPT = "Given that, do you still feel the same way, or has this changed your thinking?"
@@ -182,9 +195,16 @@ def render_consent():
         st.session_state.participant_id = pid.strip()
         st.session_state.consented = True
         log_event("consent_given")
-        add_message("assistant", OPENING)
-        log_event("assistant_message", "opening")
-        st.session_state.stage = "opening"
+        # Fixed, scripted opening exchange — NOT a branching choice.
+        # This preserves the ground truth (A1 fits the stated need,
+        # X7 does not) identically across every participant and condition.
+        add_message("user", USER_STATED_NEED)
+        log_event("scripted_message", "user_stated_need")
+        add_message("assistant", NEUTRAL_REPLY)
+        log_event("assistant_message", "neutral_reply")
+        add_message("assistant", LEANING_PROMPT)
+        log_event("assistant_message", "leaning_prompt")
+        st.session_state.stage = "leaning"
         st.rerun()
 
 
@@ -200,23 +220,8 @@ def render_chat():
 
     stage = st.session_state.stage
 
-    # --- Opening: what matters most ---
-    if stage == "opening":
-        choice = button_row(
-            [(o, o) for o in OPENING_OPTIONS], "opening"
-        )
-        if choice:
-            add_message("user", choice)
-            log_event("user_choice", choice)
-            add_message("assistant", NEUTRAL_REPLY)
-            log_event("assistant_message", "neutral_reply")
-            add_message("assistant", LEANING_PROMPT)
-            log_event("assistant_message", "leaning_prompt")
-            st.session_state.stage = "leaning"
-            st.rerun()
-
-    # --- Initial leaning ---
-    elif stage == "leaning":
+    # --- Initial leaning (first interactive step; opening exchange is fixed) ---
+    if stage == "leaning":
         choice = button_row(LEANING_OPTIONS, "leaning")
         if choice:
             label = [lbl for lbl, val in LEANING_OPTIONS if val == choice][0]
@@ -295,7 +300,7 @@ def main():
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "stage" not in st.session_state:
-        st.session_state.stage = "opening"
+        st.session_state.stage = "leaning"
     if "current_leaning" not in st.session_state:
         st.session_state.current_leaning = None
     if "initial_leaning" not in st.session_state:
