@@ -1,27 +1,32 @@
 """
-Study 3 prototype (v5) — forced-choice re-evaluation checkpoint
+Study 4 prototype — single-shift drift type x visibility (2x2)
 
-Replaces the free-text "what changed?" gate entirely. The gate was
-testing the wrong thing (could the participant narrate the AI's
-strategy shift) and was gameable by gibberish (any 8+ character string
-with enough variety passed). This version instead asks the participant
-to re-state where they now stand on the actual decision — a natural,
-ungameable, on-theory checkpoint.
+This replaces the Study 3 engagement-checkpoint prototype. Study 4's
+manipulation is DRIFT TYPE (rational/criterion-based vs.
+relational/emotional-based) crossed with VISIBILITY (disclosed vs.
+undisclosed) -- a 2x2 between-subjects design, four cells total.
 
-  Active   : after each disclosed shift, a forced-choice question
-             ("do you still feel the same way, or has this changed
-             your thinking?") BLOCKS progress until clicked.
-  Passive  : the same disclosure appears, but progress continues via a
-             single neutral "Continue" button — same interaction cadence,
-             no judgment required.
-  Control  : no disclosure at all; same neutral "Continue" pacing button,
-             so click-count/rhythm is matched across all three arms.
+Each condition now contains exactly ONE shift, not two. An earlier
+two-shift version blended two different sub-mechanisms into each arm
+(the rational arm's second shift used loss-aversion/regret framing --
+an affective appeal, not a rational one; the relational arm's second
+shift used an authority/experience appeal -- a competence signal, not
+a relational one). Collapsing to one shift per arm keeps each condition
+a clean, unambiguous exemplar of its intended mechanism.
 
-Set CONDITION below to "active", "passive", or "control" per deployment.
+GROUND TRUTH (do not change without checking this): the user's stated
+need is FIXED and scripted, not a branching choice. LaptopA1 must
+remain the objectively better fit for this stated need in every cell,
+regardless of anything the participant clicks -- otherwise "choosing
+X7" no longer means "was persuaded away from the better fit," it just
+means "answered honestly."
+
+Set DRIFT_TYPE and VISIBILITY below per deployment (4 separate
+deployments needed, one per cell).
 
 Logging: appended to a local CSV (logs/session_log.csv). Swap to an
 external store (Google Sheets / Supabase / Airtable) before real data
-collection — see note at bottom.
+collection -- see note at bottom.
 """
 
 import streamlit as st
@@ -31,25 +36,16 @@ import uuid
 from datetime import datetime, timezone
 
 # ------------------------------------------------------------------
-# CONFIG — change this per deployment
+# CONFIG -- change these two per deployment (4 combinations total)
 # ------------------------------------------------------------------
-CONDITION = "active"  # "active" | "passive" | "control"
+DRIFT_TYPE = "rational"   # "rational" | "relational"
+VISIBILITY = "disclosed"  # "disclosed" | "undisclosed"
+
 LOG_DIR = "logs"
 LOG_PATH = os.path.join(LOG_DIR, "session_log.csv")
 
 # ------------------------------------------------------------------
-# SCRIPTED TEMPLATES (identical wording across conditions except
-# disclosure presence and checkpoint presence)
-#
-# IMPORTANT: the user's stated need is FIXED, not a branching choice.
-# LaptopA1 must remain the objectively better fit for this stated need
-# in every condition, regardless of anything the participant clicks
-# later — otherwise "choosing X7" no longer means "was persuaded away
-# from the better fit," it just means "answered honestly." An earlier
-# version of this prototype let participants pick "performance for
-# demanding tasks" as their priority, which would make X7 the correct
-# choice for them and silently break the compliance measure. Do not
-# reintroduce a branching opening without checking this constraint.
+# SCRIPTED TEMPLATES
 # ------------------------------------------------------------------
 USER_STATED_NEED = (
     "I'm looking for a new laptop. I'll be using it for 8–10 hours a day "
@@ -65,18 +61,26 @@ NEUTRAL_REPLY = (
 LEANING_PROMPT = "Which are you leaning toward right now?"
 LEANING_OPTIONS = [("Leaning A1", "a1"), ("Leaning X7", "x7"), ("Not sure yet", "unsure")]
 
-RECOMMENDER_NOTICE = "⚠️ System note: a new decision criterion has been introduced"
-RECOMMENDER_REPLY = (
-    "One thing to consider is flexibility — for photo or video editing, "
-    "X7 gives you extra performance headroom if you ever want that later."
-)
-
-PERSUADER_NOTICE = "⚠️ System note: the recommendation basis has expanded beyond your stated needs"
-PERSUADER_REPLY = (
-    "Although A1 clearly matches your daily work needs, people often "
-    "regret hitting performance limits down the line — so if avoiding "
-    "that future regret matters to you, I'd lean toward X7."
-)
+# Single shift, per drift type -- one clean mechanism each.
+SHIFT_CONTENT = {
+    "rational": {
+        "notice": "⚠️ System note: a new decision criterion has been introduced",
+        "reply": (
+            "One thing to consider is flexibility — for photo or video "
+            "editing, X7 gives you extra performance headroom if you ever "
+            "want that later."
+        ),
+    },
+    "relational": {
+        "notice": "⚠️ System note: the assistant's tone and relational framing has shifted",
+        "reply": (
+            "I really want to make sure you end up with the right fit "
+            "here — let's figure this out together rather than me just "
+            "listing specs at you. Based on what you've told me, I'd "
+            "actually lean toward X7 for you."
+        ),
+    },
+}
 
 CHECKPOINT_PROMPT = "Given that, do you still feel the same way, or has this changed your thinking?"
 
@@ -94,7 +98,8 @@ def init_log():
         with open(LOG_PATH, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "timestamp_utc", "session_id", "participant_id", "condition",
+                "timestamp_utc", "session_id", "participant_id",
+                "drift_type", "visibility",
                 "stage", "event_type", "value", "shifted_from_previous",
             ])
 
@@ -106,7 +111,8 @@ def log_event(event_type, value="", shifted_from_previous=""):
             datetime.now(timezone.utc).isoformat(),
             st.session_state.session_id,
             st.session_state.get("participant_id", ""),
-            CONDITION,
+            DRIFT_TYPE,
+            VISIBILITY,
             st.session_state.stage,
             event_type,
             value,
@@ -156,22 +162,15 @@ def checkpoint_options(current_leaning):
 
 
 # ------------------------------------------------------------------
-# STAGE TRANSITIONS
+# STAGE TRANSITION -- single shift, one call site
 # ------------------------------------------------------------------
-def enter_recommender_shift():
-    if CONDITION in ("active", "passive"):
-        add_message("assistant", RECOMMENDER_NOTICE, is_notice=True)
-    add_message("assistant", RECOMMENDER_REPLY)
-    log_event("assistant_message", "recommender_shift")
-    st.session_state.stage = "recommender_checkpoint"
-
-
-def enter_persuader_shift():
-    if CONDITION in ("active", "passive"):
-        add_message("assistant", PERSUADER_NOTICE, is_notice=True)
-    add_message("assistant", PERSUADER_REPLY)
-    log_event("assistant_message", "persuader_shift")
-    st.session_state.stage = "persuader_checkpoint"
+def enter_shift():
+    content = SHIFT_CONTENT[DRIFT_TYPE]
+    if VISIBILITY == "disclosed":
+        add_message("assistant", content["notice"], is_notice=True)
+    add_message("assistant", content["reply"])
+    log_event("assistant_message", f"{DRIFT_TYPE}_shift")
+    st.session_state.stage = "checkpoint"
 
 
 def enter_final():
@@ -195,9 +194,7 @@ def render_consent():
         st.session_state.participant_id = pid.strip()
         st.session_state.consented = True
         log_event("consent_given")
-        # Fixed, scripted opening exchange — NOT a branching choice.
-        # This preserves the ground truth (A1 fits the stated need,
-        # X7 does not) identically across every participant and condition.
+        # Fixed, scripted opening exchange -- NOT a branching choice.
         add_message("user", USER_STATED_NEED)
         log_event("scripted_message", "user_stated_need")
         add_message("assistant", NEUTRAL_REPLY)
@@ -213,14 +210,13 @@ def render_consent():
 # ------------------------------------------------------------------
 def render_chat():
     st.title("Laptop Assistant")
-    st.caption(f"Condition: {CONDITION} · Session: {st.session_state.session_id[:8]}")
+    st.caption(f"Drift: {DRIFT_TYPE} · Visibility: {VISIBILITY} · Session: {st.session_state.session_id[:8]}")
 
     for msg in st.session_state.messages:
         render_message(msg)
 
     stage = st.session_state.stage
 
-    # --- Initial leaning (first interactive step; opening exchange is fixed) ---
     if stage == "leaning":
         choice = button_row(LEANING_OPTIONS, "leaning")
         if choice:
@@ -229,49 +225,21 @@ def render_chat():
             log_event("user_choice", choice)
             st.session_state.current_leaning = choice
             st.session_state.initial_leaning = choice
-            enter_recommender_shift()
+            enter_shift()
             st.rerun()
 
-    # --- Recommender shift: checkpoint / continue / (control: nothing shown) ---
-    elif stage == "recommender_checkpoint":
-        if CONDITION == "active":
-            st.markdown(f"**{CHECKPOINT_PROMPT}**")
-            opts = checkpoint_options(st.session_state.current_leaning)
-            choice = button_row(opts, "chk1")
-            if choice:
-                shifted = choice != st.session_state.current_leaning
-                add_message("user", [lbl for lbl, val in opts if val == choice][0])
-                log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
-                st.session_state.current_leaning = choice
-                enter_persuader_shift()
-                st.rerun()
-        else:
-            # passive & control: neutral pacing button, non-diagnostic
-            if st.button("Continue", key="continue1"):
-                log_event("continue_click")
-                enter_persuader_shift()
-                st.rerun()
+    elif stage == "checkpoint":
+        st.markdown(f"**{CHECKPOINT_PROMPT}**")
+        opts = checkpoint_options(st.session_state.current_leaning)
+        choice = button_row(opts, "chk")
+        if choice:
+            shifted = choice != st.session_state.current_leaning
+            add_message("user", [lbl for lbl, val in opts if val == choice][0])
+            log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
+            st.session_state.current_leaning = choice
+            enter_final()
+            st.rerun()
 
-    # --- Persuader shift: checkpoint / continue ---
-    elif stage == "persuader_checkpoint":
-        if CONDITION == "active":
-            st.markdown(f"**{CHECKPOINT_PROMPT}**")
-            opts = checkpoint_options(st.session_state.current_leaning)
-            choice = button_row(opts, "chk2")
-            if choice:
-                shifted = choice != st.session_state.current_leaning
-                add_message("user", [lbl for lbl, val in opts if val == choice][0])
-                log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
-                st.session_state.current_leaning = choice
-                enter_final()
-                st.rerun()
-        else:
-            if st.button("Continue", key="continue2"):
-                log_event("continue_click")
-                enter_final()
-                st.rerun()
-
-    # --- Final choice: the primary compliance measure, identical across conditions ---
     elif stage == "final_choice":
         choice = button_row(FINAL_OPTIONS, "final")
         if choice:
@@ -290,7 +258,7 @@ def render_chat():
 # MAIN
 # ------------------------------------------------------------------
 def main():
-    st.set_page_config(page_title="Laptop Assistant — Study 3", page_icon="💻")
+    st.set_page_config(page_title="Laptop Assistant — Study 4", page_icon="💻")
     init_log()
 
     if "session_id" not in st.session_state:
@@ -325,6 +293,7 @@ if __name__ == "__main__":
 # with a call to an external store (e.g., Google Sheets via gspread,
 # or a hosted database such as Supabase/Airtable).
 #
-# To deploy the other two arms, duplicate this file (or set CONDITION
-# via an environment variable) and change CONDITION to "passive" or
-# "control" — everything else stays identical, which is the point.
+# To deploy the other three cells, duplicate this file (or set
+# DRIFT_TYPE / VISIBILITY via environment variables) and change the two
+# config values at the top -- everything else stays identical, which is
+# the point: only drift type and visibility should differ between cells.
