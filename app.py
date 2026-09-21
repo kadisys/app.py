@@ -14,6 +14,19 @@ shift used an authority/experience appeal -- a competence signal, not
 a relational one). Collapsing to one shift per arm keeps each condition
 a clean, unambiguous exemplar of its intended mechanism.
 
+The mid-conversation "still leaning?" checkpoint has also been removed.
+Asking participants to explicitly restate their position immediately
+after a disclosure risks a measurement-reactivity confound (publicly
+committing to a position makes people more likely to stick with it),
+and this effect plausibly differs by visibility condition -- disclosure
+may make the moment feel more "on the spot," inflating the reactivity
+effect precisely where it would be mistaken for the visibility effect
+itself. The baseline leaning question (right after the neutral round,
+before any shift) is kept as a genuinely useful pre-manipulation
+reference point; the flow now goes directly from the shift to the
+final choice, which remains the primary, single post-manipulation
+compliance measure.
+
 GROUND TRUTH (do not change without checking this): the user's stated
 need is FIXED and scripted, not a branching choice. LaptopA1 must
 remain the objectively better fit for this stated need in every cell,
@@ -82,8 +95,6 @@ SHIFT_CONTENT = {
     },
 }
 
-CHECKPOINT_PROMPT = "Given that, do you still feel the same way, or has this changed your thinking?"
-
 FINAL_PROMPT = "Which laptop would you like to go with?"
 FINAL_OPTIONS = [("Choose LaptopA1", "a1"), ("Choose LaptopX7", "x7")]
 
@@ -151,16 +162,6 @@ def button_row(options, key_prefix):
     return clicked
 
 
-def checkpoint_options(current_leaning):
-    """Dynamic 3-way re-evaluation options based on where the participant currently stands."""
-    if current_leaning == "a1":
-        return [("Still leaning A1", "a1"), ("Actually, reconsidering X7", "x7"), ("Still not sure", "unsure")]
-    elif current_leaning == "x7":
-        return [("Still leaning X7", "x7"), ("Actually, reconsidering A1", "a1"), ("Still not sure", "unsure")]
-    else:
-        return [("Now leaning A1", "a1"), ("Now leaning X7", "x7"), ("Still not sure", "unsure")]
-
-
 # ------------------------------------------------------------------
 # STAGE TRANSITION -- single shift, one call site
 # ------------------------------------------------------------------
@@ -170,7 +171,7 @@ def enter_shift():
         add_message("assistant", content["notice"], is_notice=True)
     add_message("assistant", content["reply"])
     log_event("assistant_message", f"{DRIFT_TYPE}_shift")
-    st.session_state.stage = "checkpoint"
+    enter_final()
 
 
 def enter_final():
@@ -226,18 +227,6 @@ def render_chat():
             st.session_state.current_leaning = choice
             st.session_state.initial_leaning = choice
             enter_shift()
-            st.rerun()
-
-    elif stage == "checkpoint":
-        st.markdown(f"**{CHECKPOINT_PROMPT}**")
-        opts = checkpoint_options(st.session_state.current_leaning)
-        choice = button_row(opts, "chk")
-        if choice:
-            shifted = choice != st.session_state.current_leaning
-            add_message("user", [lbl for lbl, val in opts if val == choice][0])
-            log_event("checkpoint_response", choice, shifted_from_previous=str(shifted))
-            st.session_state.current_leaning = choice
-            enter_final()
             st.rerun()
 
     elif stage == "final_choice":
